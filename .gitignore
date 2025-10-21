@@ -1,0 +1,11 @@
+# created by virtualenv automatically
+.env
+venv/
+
+# Ignore vector store + cache directories
+vector_store_cache/
+cache/
+
+# Ignore system files
+.DS_Store
+Thumbs.db

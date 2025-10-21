@@ -1,0 +1,32 @@
+# ---------- Core Web ----------
+flask>=3.0,<4
+flask-cors>=4.0,<5
+python-dotenv>=1.0,<2
+
+# ---------- Document I/O ----------
+PyPDF2>=3.0.1,<4
+pandas>=2.2,<3
+python-docx>=1.1,<2
+python-pptx>=0.6.23,<1
+beautifulsoup4>=4.12,<5
+lxml>=5.0,<6
+openpyxl>=3.1,<4
+
+# ---------- Utilities ----------
+numpy>=1.26,<3
+scikit-learn>=1.5,<2
+requests>=2.32,<3
+
+# ---------- AI / LLM Stack ----------
+pydantic>=2.7,<3
+pydantic-settings>=2.3,<3
+langchain>=0.3.7,<0.4
+langchain-openai>=0.2.5,<0.3
+langchain-community>=0.3.7,<0.4
+openai>=1.51,<2
+huggingface-hub>=0.24,<1
+transformers>=4.44,<5
+sentence-transformers>=3.0,<4
+faiss-cpu>=1.8,<2
+tiktoken>=0.7,<1
+gunicorn
