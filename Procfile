@@ -1,1 +1,1 @@
-web: gunicorn api.index:app
+web: gunicorn FashionHub/api.index:app
