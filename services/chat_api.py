@@ -106,7 +106,7 @@ class EnhancedChatAPI:
 
         if "?" in question and "how" in question.lower():
             if not answer.startswith(("Here's how", "You can", "To ")):
-                answer = "Here's what I found: " + answer
+                answer =  + answer
         elif "what" in question.lower():
             if not answer.startswith(("What", "This", "It")):
                 answer = answer
