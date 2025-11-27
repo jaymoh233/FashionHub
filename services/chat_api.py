@@ -3,6 +3,10 @@
 import time
 import hashlib
 import logging
+import os
+from datetime import datetime
+# NEW: Import Supabase
+from supabase import create_client, Client
 
 from services.document_processor import AdvancedDocumentProcessor
 
@@ -13,6 +17,21 @@ class EnhancedChatAPI:
     def __init__(self):
         self.processor = None
         self.session_data = {}
+
+        # --- NEW: Initialize Supabase Client ---
+        # We use the SERVICE_KEY to bypass RLS permissions on the backend
+        self.supabase_url = os.environ.get("SUPABASE_URL")
+        self.supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+        self.db: Client = None
+
+        if self.supabase_url and self.supabase_key:
+            try:
+                self.db = create_client(self.supabase_url, self.supabase_key)
+                logger.info("Supabase client initialized successfully.")
+            except Exception as e:
+                logger.error(f"Failed to init Supabase: {e}")
+        else:
+            logger.warning("Supabase credentials missing in environment variables.")
 
     def setup(self, document_directory):
         logger.info("Starting enhanced document processing...")
@@ -30,7 +49,25 @@ class EnhancedChatAPI:
         logger.info("Enhanced setup complete!")
         return True
 
-    def get_intelligent_response(self, question, session_id=None):
+    # --- NEW: Helper function to save to DB ---
+    def save_bot_response(self, chat_id, answer):
+        if not self.db or not chat_id:
+            return
+
+        try:
+            current_time = datetime.now().isoformat()
+
+            # Update the row that the frontend created
+            data = self.db.table("chats").update({
+                "bot_response": answer,
+                "bot_timestamp": current_time
+            }).eq("id", chat_id).execute()
+
+            # logger.info(f"Successfully saved response to chat_id: {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to save to Supabase: {e}")
+
+    def get_intelligent_response(self, question, session_id=None, chat_id=None):  # Added chat_id param
         start_time = time.time()
 
         if not self.processor or not self.processor.qa_chain:
@@ -39,17 +76,25 @@ class EnhancedChatAPI:
         try:
             question_hash = hashlib.md5(question.encode()).hexdigest()
 
+            # Check Cache
             cached = self.processor.get_cached_response(question_hash)
             if cached:
                 self.processor.performance_metrics["cache_hits"] += 1
                 response_time = time.time() - start_time
+                answer = cached["response"]["answer"]
+
+                # --- NEW: Save Cached Response to DB ---
+                if chat_id:
+                    self.save_bot_response(chat_id, answer)
+
                 return {
-                    "answer": cached["response"]["answer"],
+                    "answer": answer,
                     "cached": True,
                     "response_time": response_time,
                     "sources": cached["response"].get("sources", [])
                 }
 
+            # Generate New Response
             enhanced_question = self._enhance_with_session_context(question, session_id)
             response = self.processor.qa_chain.invoke({"query": enhanced_question})
             answer = response["result"]
@@ -59,6 +104,10 @@ class EnhancedChatAPI:
             response_time = time.time() - start_time
 
             self._update_performance_metrics(response_time)
+
+            # --- NEW: Save Generated Response to DB ---
+            if chat_id:
+                self.save_bot_response(chat_id, answer)
 
             result = {
                 "answer": answer,
@@ -78,6 +127,12 @@ class EnhancedChatAPI:
 
         except Exception as e:
             logger.error(f"Error processing question: {str(e)}")
+
+            # --- NEW: Save Error to DB (Optional but recommended) ---
+            # If generation fails, tell the user via the DB so they aren't stuck "Thinking"
+            if chat_id:
+                self.save_bot_response(chat_id, "I encountered a server error processing your request.")
+
             return {"error": f"Processing failed: {str(e)}"}
 
     def _enhance_with_session_context(self, question, session_id):
@@ -106,7 +161,7 @@ class EnhancedChatAPI:
 
         if "?" in question and "how" in question.lower():
             if not answer.startswith(("Here's how", "You can", "To ")):
-                answer =  + answer
+                answer = answer
         elif "what" in question.lower():
             if not answer.startswith(("What", "This", "It")):
                 answer = answer

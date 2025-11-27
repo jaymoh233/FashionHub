@@ -9,6 +9,7 @@ from werkzeug.utils import secure_filename
 
 logger = logging.getLogger(__name__)
 
+
 def register_routes(app):
     @app.route('/')
     def home():
@@ -21,10 +22,14 @@ def register_routes(app):
             question = data.get('question')
             session_id = data.get('session_id', 'default')
 
+            # --- NEW: Get the chat_id from frontend ---
+            chat_id = data.get('chat_id')
+
             if not question:
                 return jsonify({"error": "No question provided"}), 400
 
-            response = chat_api.get_intelligent_response(question, session_id)
+            # Pass chat_id to the service layer
+            response = chat_api.get_intelligent_response(question, session_id, chat_id)
             return jsonify(response)
 
         except Exception as e:
