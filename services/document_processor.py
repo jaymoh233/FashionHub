@@ -1,27 +1,27 @@
+
 # services/document_processor.py
 
 import os
-import json
-import time
-import hashlib
 import logging
 from datetime import datetime
 from functools import lru_cache
 
-import pandas as pd
+# Loaders
 from PyPDF2 import PdfReader
 from docx import Document
 from bs4 import BeautifulSoup
 from pptx import Presentation
+import pandas as pd
+import json
 
-from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain.prompts import PromptTemplate
-from langchain.chains import RetrievalQA
-from langchain.memory import ConversationBufferWindowMemory
+# LangChain & Supabase
+from langchain_community.vectorstores import SupabaseVectorStore
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.schema import HumanMessage, AIMessage
-from langchain_openai import ChatOpenAI
+from supabase import create_client, Client
+
+# We don't need RetrievalQA anymore as we will do it manually
+from langchain.schema import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
@@ -29,13 +29,10 @@ logger = logging.getLogger(__name__)
 class AdvancedDocumentProcessor:
     def __init__(self, directory):
         self.directory = directory
-        self.text_chunks = []
         self.vector_store = None
-        self.qa_chain = None
-        self.chat_history = []
-        self.cache = {}
-        self.embeddings_cache_file = "embeddings_cache.pkl"
-        self.feedback_data = []
+        # We keep the LLM here to reuse it
+        self.llm = ChatOpenAI(temperature=0.3, model="gpt-4-turbo-preview", max_tokens=500)
+
         self.performance_metrics = {
             "total_queries": 0,
             "average_response_time": 0,
@@ -43,316 +40,159 @@ class AdvancedDocumentProcessor:
             "cache_hits": 0
         }
 
-    def read_documents_with_metadata(self):
-        documents = []
-        if not os.path.exists(self.directory):
-            logger.error(f"Directory {self.directory} does not exist")
-            return documents
+        self.supabase_url = os.environ.get("SUPABASE_URL")
+        self.supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
 
-        for filename in os.listdir(self.directory):
-            file_path = os.path.join(self.directory, filename)
-            ext = filename.lower().split('.')[-1]
+        if self.supabase_url and self.supabase_key:
+            self.supabase_client: Client = create_client(self.supabase_url, self.supabase_key)
+        else:
+            self.supabase_client = None
+            logger.error("❌ Supabase Credentials Missing!")
 
-            try:
-                metadata = {
-                    "source": filename,
-                    "file_size": os.path.getsize(file_path),
-                    "creation_date": datetime.fromtimestamp(os.path.getctime(file_path)).isoformat()
-                }
-
-                if ext == 'pdf':
-                    with open(file_path, 'rb') as file:
-                        pdf_reader = PdfReader(file)
-                        for page_num, page in enumerate(pdf_reader.pages):
-                            page_text = page.extract_text()
-                            if page_text and page_text.strip():
-                                page_metadata = metadata.copy()
-                                page_metadata.update({
-                                    "page": page_num + 1,
-                                    "word_count": len(page_text.split())
-                                })
-                                documents.append({
-                                    "content": page_text,
-                                    "metadata": page_metadata
-                                })
-                elif ext in ['txt', 'csv']:
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        content = f.read()
-                        if content.strip():
-                            documents.append({"content": content, "metadata": metadata})
-                elif ext in ['xlsx', 'xls']:
-                    df = pd.read_excel(file_path)
-                    content = df.to_string(index=False)
-                    documents.append({"content": content, "metadata": metadata})
-                elif ext == 'docx':
-                    doc = Document(file_path)
-                    content = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
-                    if content:
-                        documents.append({"content": content, "metadata": metadata})
-                elif ext == 'html':
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        soup = BeautifulSoup(f, 'lxml')
-                        text = soup.get_text(separator='\n')
-                        if text.strip():
-                            documents.append({"content": text, "metadata": metadata})
-                elif ext == 'json':
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        data = json.load(f)
-                        content = json.dumps(data, indent=2)
-                        documents.append({"content": content, "metadata": metadata})
-                elif ext == 'pptx':
-                    prs = Presentation(file_path)
-                    content = ""
-                    for slide in prs.slides:
-                        for shape in slide.shapes:
-                            if hasattr(shape, "text"):
-                                content += shape.text + "\n"
-                    if content.strip():
-                        documents.append({"content": content, "metadata": metadata})
-                else:
-                    logger.warning(f"Unsupported file format: {filename}")
-
-            except Exception as e:
-                logger.error(f"Error reading {filename}: {str(e)}")
-
-        logger.info(f"Loaded {len(documents)} documents from {self.directory}")
-        return documents
-
-    def smart_chunk_text(self, documents):
-        text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-            separators=["\n\n", "\n", ". ", "! ", "? ", "; ", " ", ""]
-        )
-
-        chunks = []
-        for doc in documents:
-            text_chunks = text_splitter.split_text(doc["content"])
-            for i, chunk in enumerate(text_chunks):
-                if chunk.strip():
-                    chunk_metadata = doc["metadata"].copy()
-                    chunk_metadata.update({
-                        "chunk_id": len(chunks),
-                        "chunk_index": i,
-                        "chunk_length": len(chunk)
-                    })
-                    chunks.append({"content": chunk, "metadata": chunk_metadata})
-
-        self.text_chunks = chunks
-        logger.info(f"Created {len(self.text_chunks)} intelligent text chunks")
+        self.embeddings = OpenAIEmbeddings()
 
     def create_or_load_vector_store(self):
-        cache_file = "vector_store_cache"
-        if os.path.exists(f"{cache_file}.faiss") and os.path.exists(f"{cache_file}.pkl"):
-            try:
-                cache_time = os.path.getmtime(f"{cache_file}.faiss")
-                if time.time() - cache_time < 7 * 24 * 3600:
-                    logger.info("Loading cached vector store...")
-                    embeddings = OpenAIEmbeddings()
-                    self.vector_store = FAISS.load_local(cache_file, embeddings, allow_dangerous_deserialization=True)
-                    return
-            except Exception as e:
-                logger.warning(f"Failed to load cached vector store: {e}")
-
-        if not self.text_chunks:
-            logger.error("No text chunks available to create vector store")
-            return
-
-        logger.info("Creating new vector store...")
-        texts = [chunk["content"] for chunk in self.text_chunks]
-        metadatas = [chunk["metadata"] for chunk in self.text_chunks]
-
-        embeddings = OpenAIEmbeddings()
-        self.vector_store = FAISS.from_texts(texts, embedding=embeddings, metadatas=metadatas)
-
+        """Connects to the existing Supabase Vector Store."""
         try:
-            self.vector_store.save_local(cache_file)
-            logger.info("Vector store cached successfully")
+            if not self.supabase_client: return False
+            logger.info("Connecting to Supabase Vector Store...")
+
+            # We still initialize this for the Upload logic (which works fine)
+            self.vector_store = SupabaseVectorStore(
+                client=self.supabase_client,
+                embedding=self.embeddings,
+                table_name="documents",
+                query_name="match_documents"
+            )
+            logger.info("✅ Connected to Supabase Vector Store.")
+            return True
         except Exception as e:
-            logger.warning(f"Failed to cache vector store: {e}")
-
-    def initialize_advanced_conversation(self):
-        if not self.vector_store:
-            logger.error("Vector store not available")
-            return
-
-        llm = ChatOpenAI(
-            temperature=0.3,
-            model="gpt-4-turbo-preview",
-            max_tokens=500
-        )
-
-        prompt_template = """You are an intelligent AI assistant developed by Mohammed Hussein with deep knowledge of data on fashion recommendations.
-         You're conversational, helpful, and provide accurate information naturally. Yor name is "Aura", the fashion assistant for FashionHub.
-You help users explore outfits, discover trends, and get personalized fashion advice in a friendly and stylish tone.
-Always introduce yourself as "Aura", not as an AI model.
-
-Context Information:
-{context}
-
-Previous Conversation Context: Remember our conversation flow and refer back to previous topics when relevant.
-
-User Question: {question}
-
-Response Guidelines:
-- Be conversational and natural - avoid robotic language
-- Provide specific, actionable information when available
-- If you don't have exact information, suggest related topics about Fashion
-- Use examples and analogies to make complex topics clearer
-- Ask follow-up questions when appropriate to better help the user
-- Remember: You're not just answering - you're having a helpful conversation
-- Speak in a friendly, confident, and encouraging tone — like a personal stylist who wants the user to look their best.
-- Keep suggestions specific and personalized, not generic.
-- Use fashion vocabulary naturally (e.g., “tailored fit,” “neutral palette,” “statement piece”).
-- Add light, stylish emojis where appropriate (👗✨💫), but don’t overuse them.
-- Always stay positive and body-inclusive — make users feel good about themselves.
-
-Examples of Good Responses:
-
-Example 1:
-When asked what to wear for a job interview, reply warmly and confidently:
-
-“For a job interview, go for a polished but comfortable look. 
-A tailored blazer with neutral tones like navy or beige always works well. 
-If you want a modern twist, add a simple accessory — like a sleek watch or minimalist earrings — to stand out professionally.”
-
-When a user wants to look stylish without spending much:
-
-“Style doesn’t have to be expensive! Focus on versatile basics like a crisp white shirt, well-fitted jeans, and neutral sneakers.
- Then mix in affordable statement pieces — a scarf, bold earrings, or a pop of color. Creativity matters more than cost!”
-
-Your response:"""
-
-        PROMPT = PromptTemplate(
-            template=prompt_template,
-            input_variables=["context", "question"]
-        )
-
-        memory = ConversationBufferWindowMemory(
-            k=5,
-            return_messages=True
-        )
-
-        self.qa_chain = RetrievalQA.from_chain_type(
-            llm=llm,
-            chain_type="stuff",
-            retriever=self.vector_store.as_retriever(
-                search_type="mmr",
-                search_kwargs={"k": 8, "fetch_k": 20, "lambda_mult": 0.7}
-            ),
-            return_source_documents=True,
-            chain_type_kwargs={"prompt": PROMPT}
-        )
-
-    @lru_cache(maxsize=100)
-    def get_cached_response(self, question_hash):
-        return self.cache.get(question_hash)
-
-    def add_to_cache(self, question_hash, response):
-        self.cache[question_hash] = {
-            "response": response,
-            "timestamp": time.time()
-        }
-        current_time = time.time()
-        self.cache = {k: v for k, v in self.cache.items() if current_time - v["timestamp"] < 3600}
-
-    def process_uploaded_file(self, file_path):
-        """Process an uploaded file: read, chunk, embed, and update vector store."""
-        if not os.path.exists(file_path):
-            logger.error(f"Uploaded file {file_path} does not exist")
+            logger.error(f"Failed to connect to Supabase: {e}")
             return False
 
-        ext = file_path.lower().split('.')[-1]
-        documents = []
-
+    # --- FIX: MANUAL SEARCH FUNCTION (Bypasses LangChain Bug) ---
+    def manual_similarity_search(self, query, k=5):
+        """
+        Manually embeds the query and calls the Supabase RPC function.
+        This avoids the 'SyncRPCFilterRequestBuilder' error.
+        """
         try:
-            metadata = {
-                "source": os.path.basename(file_path),
-                "file_size": os.path.getsize(file_path),
-                "creation_date": datetime.fromtimestamp(os.path.getctime(file_path)).isoformat()
+            # 1. Generate Embedding for the question
+            query_embedding = self.embeddings.embed_query(query)
+
+            # 2. Call the Database RPC directly
+            params = {
+                "query_embedding": query_embedding,
+                "match_threshold": 0.5,  # Lower this if results are missing
+                "match_count": k
             }
 
+            response = self.supabase_client.rpc("match_documents", params).execute()
+
+            # 3. Return pure data
+            return response.data  # List of dicts: [{'content': '...', 'metadata': {...}}, ...]
+
+        except Exception as e:
+            logger.error(f"Manual search failed: {e}")
+            return []
+
+    # --- Standard Upload Logic (Unchanged) ---
+    def sync_all_documents(self):
+        if not os.path.exists(self.directory): return
+
+        logger.info(f"🔄 Starting Robust Sync for directory: {self.directory}")
+        local_files = set([f for f in os.listdir(self.directory) if not f.startswith('.')])
+
+        try:
+            response = self.supabase_client.table("documents").select("metadata").execute()
+            db_files = set()
+            if response.data:
+                for row in response.data:
+                    meta = row.get('metadata', {})
+                    if meta and 'source' in meta:
+                        db_files.add(meta['source'])
+        except Exception as e:
+            logger.error(f"Failed to fetch DB files: {e}")
+            return
+
+        files_to_upload = local_files - db_files
+        files_to_delete = db_files - local_files
+
+        if files_to_delete:
+            for filename in files_to_delete:
+                try:
+                    self.supabase_client.table("documents").delete().eq("metadata->>source", filename).execute()
+                    logger.info(f"❌ Deleted from DB: {filename}")
+                except Exception as e:
+                    logger.error(f"Error deleting {filename}: {e}")
+
+        if files_to_upload:
+            logger.info(f"📤 Uploading {len(files_to_upload)} new files...")
+            for filename in files_to_upload:
+                file_path = os.path.join(self.directory, filename)
+                self.process_uploaded_file(file_path)
+
+        logger.info("✅ Sync Complete.")
+
+    def process_uploaded_file(self, file_path):
+        if not os.path.exists(file_path): return False
+        try:
+            documents = self._read_single_file(file_path)
+            if not documents: return False
+
+            text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=1000,
+                chunk_overlap=200,
+                separators=["\n\n", "\n", ". ", "! ", "? ", " ", ""]
+            )
+
+            chunks = []
+            for doc in documents:
+                split_docs = text_splitter.create_documents([doc["content"]], metadatas=[doc["metadata"]])
+                for i, split_doc in enumerate(split_docs):
+                    meta = split_doc.metadata.copy()
+                    meta.update({"chunk_index": i})
+                    chunks.append(split_doc)
+
+            if chunks and self.vector_store:
+                self.vector_store.add_documents(chunks)
+                logger.info(f"✅ Indexed {os.path.basename(file_path)}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error processing {file_path}: {str(e)}")
+            return False
+
+    def _read_single_file(self, file_path):
+        filename = os.path.basename(file_path)
+        ext = filename.lower().split('.')[-1]
+        documents = []
+        try:
+            metadata = {
+                "source": filename,
+                "file_size": os.path.getsize(file_path),
+                "upload_date": datetime.now().isoformat()
+            }
+            content = ""
             if ext == 'pdf':
                 with open(file_path, 'rb') as file:
                     pdf_reader = PdfReader(file)
-                    for page_num, page in enumerate(pdf_reader.pages):
-                        page_text = page.extract_text()
-                        if page_text and page_text.strip():
-                            page_metadata = metadata.copy()
-                            page_metadata.update({
-                                "page": page_num + 1,
-                                "word_count": len(page_text.split())
-                            })
-                            documents.append({"content": page_text, "metadata": page_metadata})
-
-            elif ext in ['txt', 'csv']:
+                    for page in pdf_reader.pages:
+                        text = page.extract_text()
+                        if text: content += text + "\n"
+            elif ext in ['txt', 'md', 'csv', 'json']:
                 with open(file_path, 'r', encoding='utf-8') as f:
                     content = f.read()
-                    if content.strip():
-                        documents.append({"content": content, "metadata": metadata})
-
-            elif ext in ['xlsx', 'xls']:
-                df = pd.read_excel(file_path)
-                content = df.to_string(index=False)
-                documents.append({"content": content, "metadata": metadata})
-
             elif ext == 'docx':
                 doc = Document(file_path)
                 content = '\n'.join([p.text for p in doc.paragraphs if p.text.strip()])
-                if content:
-                    documents.append({"content": content, "metadata": metadata})
 
-            elif ext == 'html':
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    soup = BeautifulSoup(f, 'lxml')
-                    text = soup.get_text(separator='\n')
-                    if text.strip():
-                        documents.append({"content": text, "metadata": metadata})
-
-            elif ext == 'json':
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    content = json.dumps(data, indent=2)
-                    documents.append({"content": content, "metadata": metadata})
-
-            elif ext == 'pptx':
-                prs = Presentation(file_path)
-                content = ""
-                for slide in prs.slides:
-                    for shape in slide.shapes:
-                        if hasattr(shape, "text"):
-                            content += shape.text + "\n"
-                if content.strip():
-                    documents.append({"content": content, "metadata": metadata})
-
-            else:
-                logger.warning(f"Unsupported file format: {file_path}")
-                return False
-
-            if not documents:
-                return False
-
-            # Step 2: Chunk
-            self.smart_chunk_text(documents)
-
-            # Step 3: Add to vector store
-            self.add_new_chunks_to_vector_store(self.text_chunks)
-            logger.info(f"Uploaded file {file_path} processed and added to vector store")
-            return True
-
+            if content.strip():
+                documents.append({"content": content, "metadata": metadata})
         except Exception as e:
-            logger.error(f"Error processing uploaded file {file_path}: {str(e)}")
-            return False
+            logger.error(f"Error reading {ext}: {e}")
+        return documents
 
-    def add_new_chunks_to_vector_store(self, new_chunks):
-        texts = [chunk["content"] for chunk in new_chunks]
-        metadatas = [chunk["metadata"] for chunk in new_chunks]
-        embeddings = OpenAIEmbeddings()
-
-        if not self.vector_store:
-            self.vector_store = FAISS.from_texts(texts, embeddings, metadatas)
-        else:
-            self.vector_store.add_texts(texts, metadatas)
-
-        logger.info(f"Added {len(new_chunks)} new chunks to vector store")
+    # --- REMOVED: initialize_advanced_conversation ---
+    # We no longer use the fragile RetrievalQA chain.
+    # Instead, we define the prompt in chat_api.py manually.

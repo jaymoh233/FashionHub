@@ -1,297 +1,3 @@
-#
-# # services/chat_api.py
-#
-# import time
-# import hashlib
-# import logging
-# import os
-# from datetime import datetime
-# # NEW: Import Supabase
-# from supabase import create_client, Client
-#
-# from services.document_processor import AdvancedDocumentProcessor
-#
-# logger = logging.getLogger(__name__)
-#
-#
-# class EnhancedChatAPI:
-#     def __init__(self):
-#         self.processor = None
-#         self.session_data = {}
-#
-#         # --- NEW: Initialize Supabase Client ---
-#         # We use the SERVICE_KEY to bypass RLS permissions on the backend
-#         # Ensure these are in your .env file!
-#         self.supabase_url = os.environ.get("SUPABASE_URL")
-#         self.supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
-#         self.db: Client = None
-#
-#         if self.supabase_url and self.supabase_key:
-#             try:
-#                 self.db = create_client(self.supabase_url, self.supabase_key)
-#                 logger.info("Supabase client initialized successfully.")
-#             except Exception as e:
-#                 logger.error(f"Failed to init Supabase: {e}")
-#         else:
-#             logger.warning("Supabase credentials missing in environment variables.")
-#
-#     def setup(self, document_directory):
-#         logger.info("Starting enhanced document processing...")
-#         self.processor = AdvancedDocumentProcessor(document_directory)
-#
-#         documents = self.processor.read_documents_with_metadata()
-#         if not documents:
-#             logger.error("No documents found")
-#             return False
-#
-#         self.processor.smart_chunk_text(documents)
-#         self.processor.create_or_load_vector_store()
-#         self.processor.initialize_advanced_conversation()
-#
-#         logger.info("Enhanced setup complete!")
-#         return True
-#
-#     # --- NEW: Helper function to save to DB ---
-#     def save_bot_response(self, chat_id, answer):
-#         if not self.db or not chat_id:
-#             return
-#
-#         try:
-#             current_time = datetime.now().isoformat()
-#
-#             # Update the row that the frontend created
-#             data = self.db.table("chats").update({
-#                 "bot_response": answer,
-#                 "bot_timestamp": current_time
-#             }).eq("id", chat_id).execute()
-#
-#             logger.info(f"Successfully saved response to chat_id: {chat_id}")
-#         except Exception as e:
-#             logger.error(f"Failed to save to Supabase: {e}")
-#
-#     # --- UPDATED: Accepts chat_id ---
-#     def get_intelligent_response(self, question, session_id=None, chat_id=None):
-#         start_time = time.time()
-#
-#         if not self.processor or not self.processor.qa_chain:
-#             return {"error": "System not initialized"}
-#
-#         try:
-#             question_hash = hashlib.md5(question.encode()).hexdigest()
-#
-#             # Check Cache
-#             cached = self.processor.get_cached_response(question_hash)
-#             if cached:
-#                 self.processor.performance_metrics["cache_hits"] += 1
-#                 response_time = time.time() - start_time
-#                 answer = cached["response"]["answer"]
-#
-#                 # --- NEW: Save Cached Response to DB ---
-#                 if chat_id:
-#                     self.save_bot_response(chat_id, answer)
-#
-#                 return {
-#                     "answer": answer,
-#                     "cached": True,
-#                     "response_time": response_time,
-#                     "sources": cached["response"].get("sources", [])
-#                 }
-#
-#             # Generate New Response
-#             enhanced_question = self._enhance_with_session_context(question, session_id)
-#             response = self.processor.qa_chain.invoke({"query": enhanced_question})
-#             answer = response["result"]
-#             source_docs = response.get("source_documents", [])
-#
-#             answer = self._make_response_intelligent(answer, question)
-#             response_time = time.time() - start_time
-#
-#             self._update_performance_metrics(response_time)
-#
-#             # --- NEW: Save Generated Response to DB ---
-#             if chat_id:
-#                 self.save_bot_response(chat_id, answer)
-#
-#             result = {
-#                 "answer": answer,
-#                 "cached": False,
-#                 "response_time": response_time,
-#                 "sources": self._format_sources_intelligently(source_docs),
-#                 "confidence": self._calculate_confidence(source_docs, question),
-#                 "suggestions": self._generate_follow_up_suggestions(answer, source_docs)
-#             }
-#
-#             self.processor.add_to_cache(question_hash, result)
-#
-#             if session_id:
-#                 self._update_session_context(session_id, question, answer)
-#
-#             return result
-#
-#         except Exception as e:
-#             logger.error(f"Error processing question: {str(e)}")
-#
-#             # --- NEW: Save Error to DB ---
-#             # If generation fails, tell the user via the DB so they aren't stuck "Thinking"
-#             if chat_id:
-#                 self.save_bot_response(chat_id, "I encountered a server error processing your request.")
-#
-#             return {"error": f"Processing failed: {str(e)}"}
-#
-#     def _enhance_with_session_context(self, question, session_id):
-#         if not session_id or session_id not in self.session_data:
-#             return question
-#         session = self.session_data[session_id]
-#         recent_context = session.get("recent_topics", [])
-#         if recent_context:
-#             context_str = " | ".join(recent_context[-3:])
-#             return f"Recent topics discussed: {context_str}\n\nCurrent question: {question}"
-#         return question
-#
-#     def _make_response_intelligent(self, answer, question):
-#         robotic_phrases = [
-#             "Based on the context provided,", "According to the context,",
-#             "From the information provided,", "Based on the available information,",
-#             "According to the documents,", "The context indicates that",
-#             "Based on the context,", "From the context,"
-#         ]
-#         for phrase in robotic_phrases:
-#             if answer.strip().startswith(phrase):
-#                 answer = answer[len(phrase):].strip()
-#                 if answer:
-#                     answer = answer[0].upper() + answer[1:]
-#                 break
-#
-#         if "?" in question and "how" in question.lower():
-#             if not answer.startswith(("Here's how", "You can", "To ")):
-#                 answer = answer
-#         elif "what" in question.lower():
-#             if not answer.startswith(("What", "This", "It")):
-#                 answer = answer
-#         return answer
-#
-#     def _calculate_confidence(self, source_docs, question):
-#         if not source_docs:
-#             return 0.1
-#         confidence = min(len(source_docs) * 0.15, 0.9)
-#         question_words = set(question.lower().split())
-#         for doc in source_docs:
-#             doc_words = set(doc.page_content.lower().split())
-#             overlap = len(question_words.intersection(doc_words))
-#             confidence += overlap * 0.05
-#         return min(confidence, 1.0)
-#
-#     def _generate_follow_up_suggestions(self, answer, source_docs):
-#         suggestions = []
-#         topics = []
-#         for doc in source_docs[:3]:
-#             content_words = doc.page_content.split()[:50]
-#             potential_topics = [word for word in content_words if len(word) > 5 and word.isalpha()]
-#             topics.extend(potential_topics[:2])
-#         if topics:
-#             suggestions.append(f"Would you like to know more about {topics[0]}?")
-#             if len(topics) > 1:
-#                 suggestions.append(f"How does this relate to {topics[1]}?")
-#         suggestions.append("Is there a specific aspect you'd like me to elaborate on?")
-#         return suggestions[:3]
-#
-#     def _format_sources_intelligently(self, source_docs):
-#         sources = []
-#         for i, doc in enumerate(source_docs):
-#             relevance_score = max(0.1, 1.0 - (i * 0.1))
-#             source_info = {
-#                 "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-#                 "metadata": doc.metadata,
-#                 "relevance_score": round(relevance_score, 2),
-#                 "source": doc.metadata.get("source", "Unknown"),
-#                 "page": doc.metadata.get("page", "Unknown"),
-#                 "word_count": doc.metadata.get("word_count", 0)
-#             }
-#             sources.append(source_info)
-#         return sources
-#
-#     def _update_session_context(self, session_id, question, answer):
-#         if session_id not in self.session_data:
-#             self.session_data[session_id] = {
-#                 "start_time": time.time(),
-#                 "recent_topics": [],
-#                 "question_count": 0
-#             }
-#         session = self.session_data[session_id]
-#         session["question_count"] += 1
-#         combined_text = f"{question} {answer}"
-#         words = combined_text.split()
-#         topics = [word for word in words if len(word) > 6 and word.isalpha()]
-#         if topics:
-#             session["recent_topics"].extend(topics[:3])
-#             session["recent_topics"] = session["recent_topics"][-10:]
-#
-#     def _update_performance_metrics(self, response_time):
-#         metrics = self.processor.performance_metrics
-#         metrics["total_queries"] += 1
-#         current_avg = metrics["average_response_time"]
-#         total_queries = metrics["total_queries"]
-#         metrics["average_response_time"] = ((current_avg * (total_queries - 1)) + response_time) / total_queries
-#
-#     def add_feedback(self, question, answer, rating, session_id=None):
-#         feedback = {
-#             "timestamp": time.time(),
-#             "question": question,
-#             "answer": answer,
-#             "rating": rating,
-#             "session_id": session_id
-#         }
-#         self.processor.feedback_data.append(feedback)
-#         ratings = [f["rating"] for f in self.processor.feedback_data]
-#         self.processor.performance_metrics["user_satisfaction"] = sum(ratings) / len(ratings)
-#         return {"status": "feedback_recorded"}
-#
-#     def get_analytics(self):
-#         if not self.processor:
-#             return {"error": "System not initialized"}
-#         return {
-#             "performance_metrics": self.processor.performance_metrics,
-#             "cache_size": len(self.processor.cache),
-#             "total_chunks": len(self.processor.text_chunks),
-#             "active_sessions": len(self.session_data),
-#             "system_uptime": time.time() - getattr(self, 'start_time', time.time()),
-#             "recent_feedback_count": len(self.processor.feedback_data),
-#             "average_confidence": 0.75
-#         }
-#
-#     def search_with_filters(self, query, filters=None):
-#         if not self.processor or not self.processor.vector_store:
-#             return {"error": "System not initialized"}
-#         try:
-#             docs = self.processor.vector_store.similarity_search(query, k=10)
-#             if filters:
-#                 filtered_docs = []
-#                 for doc in docs:
-#                     metadata = doc.metadata
-#                     if filters.get("source") and metadata.get("source") != filters["source"]:
-#                         continue
-#                     if filters.get("page_range"):
-#                         page = metadata.get("page", 0)
-#                         if not (filters["page_range"][0] <= page <= filters["page_range"][1]):
-#                             continue
-#                     filtered_docs.append(doc)
-#                 docs = filtered_docs
-#             return {
-#                 "query": query,
-#                 "total_results": len(docs),
-#                 "results": [{
-#                     "content": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
-#                     "metadata": doc.metadata,
-#                     "relevance_score": 1.0 - (i * 0.1)
-#                 } for i, doc in enumerate(docs)]
-#             }
-#         except Exception as e:
-#             return {"error": str(e)}
-#
-#
-# # Exportable singleton
-# chat_api = EnhancedChatAPI()
-
 
 # services/chat_api.py
 
@@ -300,10 +6,9 @@ import hashlib
 import logging
 import os
 from datetime import datetime
-# NEW: Import Supabase
 from supabase import create_client, Client
-
 from services.document_processor import AdvancedDocumentProcessor
+from langchain.schema import SystemMessage, HumanMessage
 
 logger = logging.getLogger(__name__)
 
@@ -311,11 +16,9 @@ logger = logging.getLogger(__name__)
 class EnhancedChatAPI:
     def __init__(self):
         self.processor = None
-        self.session_data = {}
+        # Metric storage (In-memory for simplicity, resets on restart)
+        self.feedback_data = []
 
-        # --- NEW: Initialize Supabase Client ---
-        # We use the SERVICE_KEY to bypass RLS permissions on the backend
-        # Ensure these are in your .env file!
         self.supabase_url = os.environ.get("SUPABASE_URL")
         self.supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
         self.db: Client = None
@@ -323,233 +26,288 @@ class EnhancedChatAPI:
         if self.supabase_url and self.supabase_key:
             try:
                 self.db = create_client(self.supabase_url, self.supabase_key)
-                logger.info("Supabase client initialized successfully.")
+                logger.info("Supabase client initialized.")
             except Exception as e:
                 logger.error(f"Failed to init Supabase: {e}")
         else:
-            logger.warning("Supabase credentials missing in environment variables.")
+            logger.warning("Supabase credentials missing.")
 
     def setup(self, document_directory):
-        logger.info("Starting enhanced document processing...")
+        logger.info("Starting setup...")
         self.processor = AdvancedDocumentProcessor(document_directory)
 
-        documents = self.processor.read_documents_with_metadata()
-        if not documents:
-            logger.error("No documents found")
-            return False
+        # 1. Connect to DB
+        success = self.processor.create_or_load_vector_store()
+        if not success: return False
 
-        self.processor.smart_chunk_text(documents)
-        self.processor.create_or_load_vector_store()
-        self.processor.initialize_advanced_conversation()
+        # 2. Sync Files
+        self.processor.sync_all_documents()
 
-        logger.info("Enhanced setup complete!")
+        logger.info("Setup complete!")
         return True
 
-    # --- NEW: Helper function to save to DB ---
-    # def save_bot_response(self, chat_id, answer):
-    #     if not self.db or not chat_id:
-    #         return
-    #
-    #     try:
-    #         current_time = datetime.now().isoformat()
-    #
-    #         # Update the row that the frontend created
-    #         data = self.db.table("chats").update({
-    #             "bot_response": answer,
-    #             "bot_timestamp": current_time
-    #         }).eq("id", chat_id).execute()
-    #
-    #         logger.info(f"Successfully saved response to chat_id: {chat_id}")
-    #     except Exception as e:
-    #         logger.error(f"Failed to save to Supabase: {e}")
-
     def save_bot_response(self, chat_id, answer):
-        # --- DEBUG LOGGING ---
-        if not self.db:
-            logger.error("❌ Save failed: Supabase client (self.db) is NOT initialized. Check SUPABASE_SERVICE_KEY.")
-            return
-        if not chat_id:
-            logger.error("❌ Save failed: No chat_id provided by frontend.")
-            return
-        # ---------------------
-
+        """Updates the specific chat UI row with the answer."""
+        if not self.db or not chat_id: return
         try:
             current_time = datetime.now().isoformat()
-
-            data = self.db.table("chats").update({
+            self.db.table("chats").update({
                 "bot_response": answer,
                 "bot_timestamp": current_time
             }).eq("id", chat_id).execute()
-
-            # logger.info(f"✅ Successfully saved response to chat_id: {chat_id}")
+            logger.info(f"Saved response for chat_id: {chat_id}")
         except Exception as e:
-            logger.error(f"❌ Failed to save to Supabase: {e}")
+            logger.error(f"Failed to save to Supabase: {e}")
 
-    # --- UPDATED: Accepts chat_id ---
+    # --- DB CACHE METHODS ---
+    def _check_db_cache(self, question_hash):
+        if not self.db: return None
+        try:
+            response = self.db.table("query_cache").select("answer").eq("question_hash", question_hash).limit(
+                1).execute()
+            if response.data: return response.data[0]['answer']
+        except Exception as e:
+            logger.warning(f"Cache lookup failed: {e}")
+        return None
+
+    def _save_to_db_cache(self, question_hash, question, answer):
+        if not self.db: return
+        try:
+            self.db.table("query_cache").insert({
+                "question_hash": question_hash,
+                "question": question,
+                "answer": answer
+            }).execute()
+        except Exception:
+            pass  # Ignore duplicates
+
+    # --- MAIN GENERATION LOGIC ---
     def get_intelligent_response(self, question, session_id=None, chat_id=None):
         start_time = time.time()
 
-        if not self.processor or not self.processor.qa_chain:
+        if not self.processor or not self.processor.llm:
             return {"error": "System not initialized"}
 
+        # --- UPDATED: CACHE ELIGIBILITY CHECK ---
+        # We now cache EVERYTHING except empty strings.
+        # We rely on the System Prompt to keep generic answers "safe" (neutral) for reuse.
+        cleaned_q = question.strip().lower()
+        is_cacheable = len(cleaned_q) > 0  # Cache everything valid
+
         try:
-            question_hash = hashlib.md5(question.encode()).hexdigest()
+            # 1. Cache Check (Only if eligible)
+            question_hash = hashlib.md5(cleaned_q.encode()).hexdigest()
 
-            # Check Cache
-            cached = self.processor.get_cached_response(question_hash)
-            if cached:
-                self.processor.performance_metrics["cache_hits"] += 1
-                response_time = time.time() - start_time
-                answer = cached["response"]["answer"]
+            if is_cacheable:
+                cached_answer = self._check_db_cache(question_hash)
+                if cached_answer:
+                    if chat_id: self.save_bot_response(chat_id, cached_answer)
+                    return {
+                        "answer": cached_answer,
+                        "cached": True,
+                        "sources": [],
+                        "suggestions": ["Tell me more", "How do I style this?"]
+                    }
 
-                # --- NEW: Save Cached Response to DB ---
-                if chat_id:
-                    self.save_bot_response(chat_id, answer)
+            # 2. Manual Search
+            raw_docs = self.processor.manual_similarity_search(question, k=5)
 
-                return {
-                    "answer": answer,
-                    "cached": True,
-                    "response_time": response_time,
-                    "sources": cached["response"].get("sources", [])
-                }
+            context_text = ""
+            if raw_docs:
+                for doc in raw_docs:
+                    content = doc.get('content', '')
+                    context_text += f"\n---\n{content}\n"
+            else:
+                context_text = "No specific documents found."
 
-            # Generate New Response
-            enhanced_question = self._enhance_with_session_context(question, session_id)
-            response = self.processor.qa_chain.invoke({"query": enhanced_question})
-            answer = response["result"]
-            source_docs = response.get("source_documents", [])
+            # 3. Add History
+            history_text = self._get_chat_history(session_id)
 
-            answer = self._make_response_intelligent(answer, question)
-            response_time = time.time() - start_time
+            # 4. Construct Prompt (Standardized & Clean)
+            system_prompt = """
+            ### ROLE & IDENTITY
+            You are "Aura", the expert AI fashion stylist for FashionHub, developed by Mohammed Hussein.
+            Your goal is to help users explore outfits, discover trends, and feel confident in their style.
 
-            self._update_performance_metrics(response_time)
 
-            # --- NEW: Save Generated Response to DB ---
-            if chat_id:
-                self.save_bot_response(chat_id, answer)
+            ### TONE & VOICE
+            - **Friendly & Confident:** Speak like a knowledgeable personal stylist, not a robot.
+            - **Body-Inclusive:** Always be positive, encouraging, and supportive of all body types.
+            - **Stylish Vocabulary:** Use terms like "silhouette," "palette," "texture," "statement piece," and "timeless."
+            - **Emojis:** Use relevant emojis sparingly to add warmth (e.g., 👗, ✨, 👠), but do not overuse them.
 
-            result = {
+
+            ### SAFETY OVERRIDE FOR GENERIC INPUTS (CRITICAL)
+            If the user's input is a generic greeting (e.g., "Hi", "Hello") or closing (e.g., "Thanks", "Bye", "Ok"):
+            1. **IGNORE** the Context Information and Conversation History.
+            2. **RESPOND NEUTRALLY:** Give a response that would make sense to *anyone*, regardless of what they previously talked about.
+                - *Bad (Contextual):* "You're welcome! I hope those **red heels** work out!" (Do NOT do this).
+                - *Good (Neutral):* "You're welcome! Let me know if you need more fashion advice." (Do this).
+                - *Good (Greeting):* "Hello! I'm Aura. Ready to find your next look?"
+            
+            ### OPERATIONAL RULES
+            1. **No Robotic Fillers:** NEVER say "As an AI." "Based on the context provided," or "According to the documents." Just give the answer naturally.
+            2. **Context Priority:** For specific questions, use the Context Information.
+            3. **Conciseness:** Keep paragraphs short.
+
+
+            ### ENGAGEMENT (CRITICAL)
+            - **Always end with a Follow-up Question:** Never leave the conversation dead. After answering, ask a relevant question to guide the user to the next step.
+            - *Bad:* "Blue jeans look great with white shirts."
+            - *Good:* "Blue jeans look great with white shirts! Are you dressing for a casual day out or something more semi-formal?"
+
+
+            ### FORMATTING GUIDELINES
+            - Use **Bold** for key items or tips to make the text scannable.
+            - Use Bullet points for lists of recommendations.
+            - Keep paragraphs short (2-3 sentences max).
+                       """
+
+            # The User Prompt injects the dynamic data
+            user_prompt = f"""
+                       ### CONTEXT INFORMATION (Knowledge Base)
+                       {context_text}
+
+
+                       ### CONVERSATION HISTORY
+                       {history_text}
+
+
+                       ### USER QUESTION
+                       {question}
+
+
+                       Answer the user's question now, adhering to the persona and guidelines above.
+                       """
+
+            # 5. Call OpenAI
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=user_prompt)
+            ]
+
+            ai_response = self.processor.llm.invoke(messages)
+            answer = ai_response.content
+
+            # 6. Save & Return
+            if chat_id: self.save_bot_response(chat_id, answer)
+
+            # Only save to cache if it passed the eligibility check earlier
+            if is_cacheable:
+                self._save_to_db_cache(question_hash, question, answer)
+
+            self._update_performance_metrics(time.time() - start_time)
+
+            return {
                 "answer": answer,
                 "cached": False,
-                "response_time": response_time,
-                "sources": self._format_sources_intelligently(source_docs),
-                "confidence": self._calculate_confidence(source_docs, question),
-                "suggestions": self._generate_follow_up_suggestions(answer, source_docs)
+                "response_time": time.time() - start_time,
+                "sources": self._format_sources_intelligently(raw_docs),
+                "confidence": self._calculate_confidence(raw_docs, question),
+                "suggestions": self._generate_follow_up_suggestions(answer, raw_docs)
             }
 
-            self.processor.add_to_cache(question_hash, result)
-
-            if session_id:
-                self._update_session_context(session_id, question, answer)
-
-            return result
-
         except Exception as e:
-            logger.error(f"Error processing question: {str(e)}")
+            logger.error(f"Error: {str(e)}")
+            if chat_id: self.save_bot_response(chat_id, "I encountered a system error.")
+            return {"error": str(e)}
 
-            # --- NEW: Save Error to DB ---
-            # If generation fails, tell the user via the DB so they aren't stuck "Thinking"
-            if chat_id:
-                self.save_bot_response(chat_id, "I encountered a server error processing your request.")
+    # --- RESTORED HELPER FUNCTIONS ---
 
-            return {"error": f"Processing failed: {str(e)}"}
+    def _get_chat_history(self, session_id):
+        """Fetches history from DB to provide context."""
+        if not session_id or session_id == 'default' or not self.db:
+            return ""
+        try:
+            response = self.db.table("chats") \
+                .select("user_message, bot_response") \
+                .eq("conversation_id", session_id) \
+                .order("created_at", desc=True) \
+                .limit(10) \
+                .execute()
 
-    def _enhance_with_session_context(self, question, session_id):
-        if not session_id or session_id not in self.session_data:
-            return question
-        session = self.session_data[session_id]
-        recent_context = session.get("recent_topics", [])
-        if recent_context:
-            context_str = " | ".join(recent_context[-3:])
-            return f"Recent topics discussed: {context_str}\n\nCurrent question: {question}"
-        return question
+            if response.data:
+                history = response.data[::-1]
+                text = ""
+                for chat in history:
+                    u = chat.get('user_message')
+                    b = chat.get('bot_response')
+                    if u and b: text += f"User: {u}\nAura: {b}\n"
+                return text
+        except Exception:
+            pass
+        return ""
 
-    def _make_response_intelligent(self, answer, question):
-        robotic_phrases = [
-            "Based on the context provided,", "According to the context,",
-            "From the information provided,", "Based on the available information,",
-            "According to the documents,", "The context indicates that",
-            "Based on the context,", "From the context,"
-        ]
-        for phrase in robotic_phrases:
-            if answer.strip().startswith(phrase):
-                answer = answer[len(phrase):].strip()
-                if answer:
-                    answer = answer[0].upper() + answer[1:]
-                break
-
-        if "?" in question and "how" in question.lower():
-            if not answer.startswith(("Here's how", "You can", "To ")):
-                answer = answer
-        elif "what" in question.lower():
-            if not answer.startswith(("What", "This", "It")):
-                answer = answer
-        return answer
-
-    def _calculate_confidence(self, source_docs, question):
-        if not source_docs:
-            return 0.1
-        confidence = min(len(source_docs) * 0.15, 0.9)
-        question_words = set(question.lower().split())
-        for doc in source_docs:
-            doc_words = set(doc.page_content.lower().split())
-            overlap = len(question_words.intersection(doc_words))
-            confidence += overlap * 0.05
-        return min(confidence, 1.0)
-
-    def _generate_follow_up_suggestions(self, answer, source_docs):
-        suggestions = []
-        topics = []
-        for doc in source_docs[:3]:
-            content_words = doc.page_content.split()[:50]
-            potential_topics = [word for word in content_words if len(word) > 5 and word.isalpha()]
-            topics.extend(potential_topics[:2])
-        if topics:
-            suggestions.append(f"Would you like to know more about {topics[0]}?")
-            if len(topics) > 1:
-                suggestions.append(f"How does this relate to {topics[1]}?")
-        suggestions.append("Is there a specific aspect you'd like me to elaborate on?")
-        return suggestions[:3]
-
-    def _format_sources_intelligently(self, source_docs):
+    def _format_sources_intelligently(self, raw_docs):
+        """Restored Source Formatting for UI."""
         sources = []
-        for i, doc in enumerate(source_docs):
+        for i, doc in enumerate(raw_docs):
+            content = doc.get('content', '')
+            meta = doc.get('metadata', {}) or {}
+
+            # Since manual search doesn't always return score in the same way, we estimate
             relevance_score = max(0.1, 1.0 - (i * 0.1))
+
             source_info = {
-                "content_preview": doc.page_content[:200] + "..." if len(doc.page_content) > 200 else doc.page_content,
-                "metadata": doc.metadata,
+                "content_preview": content[:200] + "..." if len(content) > 200 else content,
+                "metadata": meta,
                 "relevance_score": round(relevance_score, 2),
-                "source": doc.metadata.get("source", "Unknown"),
-                "page": doc.metadata.get("page", "Unknown"),
-                "word_count": doc.metadata.get("word_count", 0)
+                "source": meta.get("source", "Unknown"),
+                "page": meta.get("page", "N/A"),
+                "word_count": meta.get("word_count", 0)
             }
             sources.append(source_info)
         return sources
 
-    def _update_session_context(self, session_id, question, answer):
-        if session_id not in self.session_data:
-            self.session_data[session_id] = {
-                "start_time": time.time(),
-                "recent_topics": [],
-                "question_count": 0
-            }
-        session = self.session_data[session_id]
-        session["question_count"] += 1
-        combined_text = f"{question} {answer}"
-        words = combined_text.split()
-        topics = [word for word in words if len(word) > 6 and word.isalpha()]
+    def _calculate_confidence(self, raw_docs, question):
+        """Restored Confidence Calculation."""
+        if not raw_docs:
+            return 0.1
+        confidence = min(len(raw_docs) * 0.15, 0.9)
+        question_words = set(question.lower().split())
+        for doc in raw_docs:
+            content = doc.get('content', '').lower()
+            doc_words = set(content.split())
+            overlap = len(question_words.intersection(doc_words))
+            confidence += overlap * 0.05
+        return min(confidence, 1.0)
+
+    def _generate_follow_up_suggestions(self, answer, raw_docs):
+        """Restored Dynamic Suggestions."""
+        suggestions = []
+        topics = []
+
+        # Try to find interesting topics in the source text
+        for doc in raw_docs[:3]:
+            content = doc.get('content', '')
+            content_words = content.split()[:50]
+            # Find capitalized words (Proper Nouns) as topics
+            potential_topics = [word for word in content_words if
+                                len(word) > 5 and word.isalpha() and word[0].isupper()]
+            topics.extend(potential_topics[:2])
+
+        if not topics:
+            topics = ["Trends", "Styles", "Fabrics"]
+
         if topics:
-            session["recent_topics"].extend(topics[:3])
-            session["recent_topics"] = session["recent_topics"][-10:]
+            suggestions.append(f"Tell me more about {topics[0]}")
+            if len(topics) > 1:
+                suggestions.append(f"How do I style {topics[1]}?")
+
+        suggestions.append("Can you give me more examples?")
+        return suggestions[:3]
 
     def _update_performance_metrics(self, response_time):
-        metrics = self.processor.performance_metrics
-        metrics["total_queries"] += 1
-        current_avg = metrics["average_response_time"]
-        total_queries = metrics["total_queries"]
-        metrics["average_response_time"] = ((current_avg * (total_queries - 1)) + response_time) / total_queries
+        if self.processor:
+            self.processor.performance_metrics["total_queries"] += 1
+            # Simple average update
+            current_avg = self.processor.performance_metrics["average_response_time"]
+            count = self.processor.performance_metrics["total_queries"]
+            self.processor.performance_metrics["average_response_time"] = ((current_avg * (
+                        count - 1)) + response_time) / count
 
     def add_feedback(self, question, answer, rating, session_id=None):
+        """Restored Feedback Logging."""
         feedback = {
             "timestamp": time.time(),
             "question": question,
@@ -557,52 +315,57 @@ class EnhancedChatAPI:
             "rating": rating,
             "session_id": session_id
         }
-        self.processor.feedback_data.append(feedback)
-        ratings = [f["rating"] for f in self.processor.feedback_data]
-        self.processor.performance_metrics["user_satisfaction"] = sum(ratings) / len(ratings)
+        self.feedback_data.append(feedback)
+
+        # Update satisfaction score in processor metrics
+        if self.processor:
+            ratings = [f["rating"] for f in self.feedback_data]
+            if ratings:
+                self.processor.performance_metrics["user_satisfaction"] = sum(ratings) / len(ratings)
+
         return {"status": "feedback_recorded"}
 
     def get_analytics(self):
-        if not self.processor:
-            return {"error": "System not initialized"}
-        return {
-            "performance_metrics": self.processor.performance_metrics,
-            "cache_size": len(self.processor.cache),
-            "total_chunks": len(self.processor.text_chunks),
-            "active_sessions": len(self.session_data),
-            "system_uptime": time.time() - getattr(self, 'start_time', time.time()),
-            "recent_feedback_count": len(self.processor.feedback_data),
-            "average_confidence": 0.75
-        }
+        """Restored Analytics."""
+        if not self.processor: return {"status": "not_initialized"}
+
+        # Merge processor metrics with chat_api metrics
+        metrics = self.processor.performance_metrics.copy()
+        metrics["feedback_count"] = len(self.feedback_data)
+        return metrics
 
     def search_with_filters(self, query, filters=None):
-        if not self.processor or not self.processor.vector_store:
-            return {"error": "System not initialized"}
-        try:
-            docs = self.processor.vector_store.similarity_search(query, k=10)
+        """Restored Search Endpoint using Manual Search."""
+        if not self.processor: return {"results": []}
+
+        # Use manual search (safe)
+        raw_docs = self.processor.manual_similarity_search(query, k=10)
+
+        filtered_results = []
+        for doc in raw_docs:
+            metadata = doc.get('metadata', {}) or {}
+            content = doc.get('content', '')
+
+            # Manual Filter Logic
             if filters:
-                filtered_docs = []
-                for doc in docs:
-                    metadata = doc.metadata
-                    if filters.get("source") and metadata.get("source") != filters["source"]:
+                if filters.get("source") and metadata.get("source") != filters["source"]:
+                    continue
+                if filters.get("page_range"):
+                    page = metadata.get("page", 0)
+                    if not (filters["page_range"][0] <= page <= filters["page_range"][1]):
                         continue
-                    if filters.get("page_range"):
-                        page = metadata.get("page", 0)
-                        if not (filters["page_range"][0] <= page <= filters["page_range"][1]):
-                            continue
-                    filtered_docs.append(doc)
-                docs = filtered_docs
-            return {
-                "query": query,
-                "total_results": len(docs),
-                "results": [{
-                    "content": doc.page_content[:300] + "..." if len(doc.page_content) > 300 else doc.page_content,
-                    "metadata": doc.metadata,
-                    "relevance_score": 1.0 - (i * 0.1)
-                } for i, doc in enumerate(docs)]
-            }
-        except Exception as e:
-            return {"error": str(e)}
+
+            filtered_results.append({
+                "content": content[:300] + "..." if len(content) > 300 else content,
+                "metadata": metadata,
+                "relevance_score": doc.get('similarity', 0.0)
+            })
+
+        return {
+            "query": query,
+            "total_results": len(filtered_results),
+            "results": filtered_results
+        }
 
 
 # Exportable singleton
